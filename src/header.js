@@ -31,11 +31,13 @@ var globalStore = {};
 // erp.support(params) gives an array of support elements.
 // erp.grad(params, val) gives the gradient of score at val wrt params.
 
-function ERP(sampler, scorer, supporter, grad) {
+function ERP(sampler, scorer, supporter, grad, proposer, proposalScorer) {
   this.sample = sampler;
   this.score = scorer;
   this.support = supporter;
   this.grad = grad;
+  this.proposal = proposer;
+  this.proposalScore = proposalScorer;
 }
 
 var uniformERP = new ERP(
@@ -110,11 +112,18 @@ function gaussianFactor(store, k, addr, mu, std, val){
   coroutine.factor(store, k, addr, gaussianScore([mu, std], val));
 }
 
+function gaussianProposal(params, x){
+  return gaussianSample([x, params[1]]);
+}
+
+function gaussianProposalScore(params, prevVal, newVal){
+  return gaussianScore([prevVal, params[1]], newVal);
+}
+var gaussianERP = new ERP(gaussianSample, gaussianScore, undefined, undefined, gaussianProposal, gaussianProposalScore);
+
 function erpFactor(store, k, addr, erp, params, val){
   coroutine.factor(store, k, addr, erp.score(params, val));
 }
-
-var gaussianERP = new ERP(gaussianSample, gaussianScore);
 
 var discreteERP = new ERP(
   function discreteSample(params){
@@ -309,37 +318,51 @@ var poissonERP = new ERP(
   }
 );
 
-var dirichletERP = new ERP(
-  function dirichletSample(params){
-    var alpha = params;
-    var ssum = 0;
-    var theta = [];
-    var t;
-    for (var i = 0; i < alpha.length; i++) {
-      t = gammaSample([alpha[i], 1]);
-      theta[i] = t;
-      ssum = ssum + t;
-    }
-    for (var i = 0; i < theta.length; i++) {
-      theta[i] /= ssum;
-    }
-    return theta;
-  },
-  function dirichletScore(params, val){
-    var alpha = params;
-    var theta = val;
-    var asum = 0;
-    for (var i = 0; i < alpha.length; i++) {
-      asum += alpha[i];
-    }
-    var logp = logGamma(asum);
-    for (var i = 0; i < alpha.length; i++){
-      logp += (alpha[i]-1)*Math.log(theta[i]);
-      logp -= logGamma(alpha[i]);
-    }
-    return logp;
+function dirichletSample(params){
+  var alpha = params;
+  var ssum = 0;
+  var theta = [];
+  var t;
+  for (var i = 0; i < alpha.length; i++) {
+    t = gammaSample([alpha[i], 1]);
+    theta[i] = t;
+    ssum = ssum + t;
   }
-);
+  for (var i = 0; i < theta.length; i++) {
+    theta[i] /= ssum;
+  }
+  return theta;
+};
+
+function dirichletScore(params, val){
+  var alpha = params;
+  var theta = val;
+  var asum = 0;
+  for (var i = 0; i < alpha.length; i++) {
+    asum += alpha[i];
+  }
+  var logp = logGamma(asum);
+  for (var i = 0; i < alpha.length; i++){
+    logp += (alpha[i]-1)*Math.log(theta[i]);
+    logp -= logGamma(alpha[i]);
+  }
+  return logp;
+};
+
+function dirichletProposal(params, x){
+  var concentration_scalar = 0.0000001; // arbitrary
+  var drift_params = x.map(function(xi){return concentration_scalar*xi});
+  return dirichletSample(drift_params);
+};
+
+function dirichletProposalScore(params,prevVal,newVal){
+  var concentration_scalar = 0.0000001; // arbitrary
+  var drift_params = prevVal.map(function(xi){return concentration_scalar*xi});
+  return dirichletScore(drift_params, newVal);
+};
+
+var dirichletERP = new ERP(dirichletSample, dirichletScore, undefined, undefined, dirichletProposal, dirichletProposalScore);
+
 
 function multinomialSample(theta) {
   var thetaSum = util.sum(theta);
@@ -777,18 +800,34 @@ function MH(s, k, a, wpplFn, numIterations) {
 
 MH.prototype.factor = function(s, k, a, score) {
   coroutine.currScore += score;
+  //console.log(coroutine.currScore)
   k(s);
 };
 
 MH.prototype.sample = function(s, cont, name, erp, params, forceSample) {
   var prev = findChoice(coroutine.oldTrace, name);
+  //console.log(prev)
   var reuse = ! (prev==undefined | forceSample);
-  var val = reuse ? prev.val : erp.sample(params);
+  // drift proposal (if defined)
+  var val = reuse ? prev.val : (prev==undefined ? erp.sample(params) : (erp.proposal ? erp.proposal(params, prev.val) : erp.sample(params)));
+  //console.log(val)
+  //var val = reuse ? prev.val : erp.sample(params);
   var choiceScore = erp.score(params,val);
+  if (!reuse && erp.proposal && !(prev==undefined)){
+    //console.log('propose');
+    choiceScore = erp.proposalScore(params, prev.val, val); 
+    //console.log(choiceScore)
+    //previously, there was += but I think it should be just =
+    // This raises the question: do we need choiceScore =erp.score(params,val) if reuse?
+    // the only line that i'm uncertain about is 822 (currently)... bw+= (!nc || !nc.reused)
+    //, in particular when the !nc will be true... because this is the only other place where choiceScore is...
+  }
   coroutine.trace.push({k: cont, name: name, erp: erp, params: params,
                        score: coroutine.currScore, choiceScore: choiceScore,
                        val: val, reused: reuse, store: util.copyObj(s)});
-  coroutine.currScore += choiceScore;
+  coroutine.currScore += erp.score(params,val);
+  // console.log(coroutine.currScore)
+  // console.log(params,choiceScore)
   cont(s, val);
 };
 
@@ -803,8 +842,8 @@ function findChoice(trace, name) {
   }
   return undefined;
 }
-
-function MHacceptProb(trace, oldTrace, regenFrom, currScore, oldScore){
+ function MHacceptProb(trace, oldTrace, regenFrom, currScore, oldScore){
+  //console.log(currScore,oldScore)
   if(oldTrace == undefined){return 1;} //just for init
   var fw = -Math.log(oldTrace.length);
   trace.slice(regenFrom).map(function(s){fw += s.reused?0:s.choiceScore;});
@@ -812,11 +851,14 @@ function MHacceptProb(trace, oldTrace, regenFrom, currScore, oldScore){
   oldTrace.slice(regenFrom).map(function(s){
     var nc = findChoice(trace, s.name);
     bw += (!nc || !nc.reused) ? s.choiceScore : 0;  });
+  //console.log(Math.exp(currScore - oldScore + bw - fw))
   var acceptance = Math.min(1, Math.exp(currScore - oldScore + bw - fw));
+  //console.log(acceptance)
   return acceptance;
 }
 
 MH.prototype.exit = function(s, val) {
+    var accept_count =0;
   if (coroutine.iterations > 0) {
     coroutine.iterations -= 1;
 
@@ -824,6 +866,7 @@ MH.prototype.exit = function(s, val) {
     var acceptance = MHacceptProb(coroutine.trace, coroutine.oldTrace,
                                   coroutine.regenFrom, coroutine.currScore, coroutine.oldScore);
     if (!(Math.random()<acceptance)){
+      accept_count+=1;
       // if rejected, roll back trace, etc:
       coroutine.trace = coroutine.oldTrace;
       coroutine.currScore = coroutine.oldScore;
@@ -857,6 +900,7 @@ MH.prototype.exit = function(s, val) {
     // Return by calling original continuation:
     k(this.oldStore, dist);
   }
+  console.log(accept_count);
 };
 
 function mh(s, cc, a, wpplFn, numParticles) {

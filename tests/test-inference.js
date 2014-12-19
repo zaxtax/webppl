@@ -216,7 +216,7 @@ exports.testParticleFilter = {
 };
 
 exports.testMH = {
-  test1: function(test){
+  testFlip: function(test){
     var code = ("MH(" +
                 "  function(){" +
                 "    var x = flip(0.5);" +
