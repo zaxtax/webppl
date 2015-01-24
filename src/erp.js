@@ -408,4 +408,4 @@ module.exports = {
   randomIntegerERP: randomIntegerERP,
   uniformERP: uniformERP,
   makeMarginalERP: makeMarginalERP
-}
+};

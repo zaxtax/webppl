@@ -4,21 +4,13 @@
 
 var fs = require('fs');
 var webppl = require('./src/main');
+var util = require('./src/util');
 var parseArgs = require('minimist');
 var path = require('path');
 var git = require('git-rev-2');
 
 function asArray(xs){
   return (xs ? ((xs instanceof Array) ? xs : [xs]) : []);
-}
-
-function requireAsGlobal(modulePath){
-  var runtime = require(modulePath);
-  for (var prop in runtime){
-    if (runtime.hasOwnProperty(prop)){
-      global[prop] = runtime[prop];
-    }
-  }
 }
 
 function isErp(x){
@@ -69,7 +61,7 @@ function run(code, requires, verbose){
       if (req.type === 'require-js'){
         global[req.name] = require(req.path);
       } else if (req.type === 'require-header') {
-        requireAsGlobal(req.path);
+        top.requireAsGlobal(req.path);
       } else if (req.type === 'require-wppl') {
         var reqCode = fs.readFileSync(req.path, 'utf8');
         code = reqCode + ';' + code;
@@ -88,7 +80,7 @@ function run(code, requires, verbose){
 
 function compile(code, requires, verbose, outputFile){
   var compiledCode = '';
-  compiledCode += requireAsGlobal.toString() + ';\n';
+  compiledCode += top.requireAsGlobal.toString() + ';\n';
   requires.push({
     name: 'webppl',
     path: require.resolve('./src/main'),
@@ -99,7 +91,7 @@ function compile(code, requires, verbose, outputFile){
       if (req.type === 'require-js'){
         compiledCode += "var " + req.name + " = require('" + req.path + "');\n";
       } else if (req.type === 'require-header') {
-        compiledCode += "requireAsGlobal('" + req.path + "');\n";
+        compiledCode += "top.requireAsGlobal('" + req.path + "');\n";
       } else if (req.type === 'require-wppl') {
         var reqCode = fs.readFileSync(req.path, 'utf8');
         code = reqCode + ';' + code;

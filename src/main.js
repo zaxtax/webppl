@@ -14,18 +14,18 @@ var varargs = require("./varargs").varargs;
 var trampoline = require("./trampoline").trampoline;
 var util = require("./util");
 
-var topK;
-var _trampoline;
 
-// Make runtime stuff globally available:
-var runtime = require("./header.js");
-for (var prop in runtime){
-  if (runtime.hasOwnProperty(prop)){
-    global[prop] = runtime[prop];
-  }
-}
+var top = {
+  continuation: null,
+  trampoline: null,
+  compiledHeader: null
+};
 
-global.CACHED_WEBPPL_HEADER = undefined;
+var header = require("./header")(top);
+
+
+// --------------------------------------------------------------------
+// Compile
 
 function addHeaderAst(targetAst, headerAst){
   targetAst.body = headerAst.body.concat(targetAst.body);
@@ -59,22 +59,25 @@ var compile = function(code, contName, isLibrary){
   return ast;
 };
 
+
 function compileProgram(programCode, verbose){
-  if (verbose && console.time){console.time('compile');}
+  if (verbose && console.time){
+    console.time('compile');
+  }
 
   var programAst, headerAst;
 
   // Compile & cache WPPL header
-  if (global.CACHED_WEBPPL_HEADER){
-    headerAst = global.CACHED_WEBPPL_HEADER;
+  if (top.compiledHeader){
+    headerAst = top.compiledHeader;
   } else {
     var headerCode = fs.readFileSync(__dirname + "/header.wppl");
     headerAst = compile(headerCode, 'dummyCont', true);
-    global.CACHED_WEBPPL_HEADER = headerAst;
+    top.compiledHeader = headerAst;
   }
 
   // Compile program code
-  programAst = compile(programCode, 'topK', false);
+  programAst = compile(programCode, 'continuation', false);
   if (verbose){
     console.log(escodegen.generate(programAst));
   }
@@ -82,61 +85,62 @@ function compileProgram(programCode, verbose){
   // Concatenate header and program
   var out = escodegen.generate(addHeaderAst(programAst, headerAst));
 
-  if (verbose && console.timeEnd){console.timeEnd('compile');}
+  if (verbose && console.timeEnd){
+    console.timeEnd('compile');
+  }
   return out;
 }
 
+
+// --------------------------------------------------------------------
+// Run
+
+function evalInContext(context, code){
+  var result = function(c){
+    return eval(c);
+  }.call(context, code);
+  return result;
+}
+
 function run(code, contFun, verbose){
-  topK = function(s, x){
-    _trampoline = null;
+  top.continuation = function(s, x){
+    top.trampoline = null;
     contFun(s, x);
   };
   var compiledCode = compileProgram(code, verbose);
-  return eval(compiledCode);
+  return evalInContext(top, compiledCode); // ?? or access as top.continuation?
 }
 
-// Compile and run some webppl code in global scope:
-function webppl_eval(k, code, verbose) {
-  var oldk = global.topK;
-  global._trampoline = undefined;
-  global.topK = function(s, x){  // Install top-level continuation
-    global._trampoline = null;
-    k(s, x);
-    global.topK = oldk;
-  };
-  var compiledCode = compileProgram(code, verbose);
-  eval.call(global, compiledCode);
-}
 
-// For use in browser
-function webpplCPS(code){
-  var programAst = esprima.parse(code);
-  var newProgramAst = optimize(cps(programAst, build.identifier("topK")));
-  return escodegen.generate(newProgramAst);
-}
+// --------------------------------------------------------------------
+// Utilities for use in browser
 
-function webpplNaming(code){
-  var programAst = esprima.parse(code);
-  var newProgramAst = naming(programAst);
-  return escodegen.generate(newProgramAst);
-}
-
-// For use in browser using browserify
 if (util.runningInBrowser()){
+  
+  function webpplCPS(code){
+    var programAst = esprima.parse(code);
+    var newProgramAst = optimize(cps(programAst, build.identifier("continuation")));
+    return escodegen.generate(newProgramAst);
+  }
+
+  function webpplNaming(code){
+    var programAst = esprima.parse(code);
+    var newProgramAst = naming(programAst);
+    return escodegen.generate(newProgramAst);
+  }
+
   window.webppl = {
     run: run,
     compile: compileProgram,
     cps: webpplCPS,
     naming: webpplNaming
   };
+  
   console.log("webppl loaded.");
-} else {
-  // Put eval into global scope. browser version??
-  global.webppl_eval = webppl_eval;
 }
 
+
 module.exports = {
-  webppl_eval: webppl_eval,
   run: run,
   compile: compileProgram,
   compileRaw: compile
